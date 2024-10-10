@@ -5,10 +5,8 @@
 #include <chrono>
 #include <mutex>
 
-// Representação do labirinto
 using Maze = std::vector<std::vector<char>>;
 
-// Estrutura para representar uma posição no labirinto
 struct Position {
     int row;
     int col;
