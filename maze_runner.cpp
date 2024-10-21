@@ -1,192 +1,159 @@
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <thread>
 #include <chrono>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stack>
+#include <thread>
+#include <vector>
 #include <mutex>
+#include <queue>
 
+// Definição de um tipo para representar o labirinto como uma matriz de caracteres
 using Maze = std::vector<std::vector<char>>;
 
+// Estrutura que define uma posição no labirinto
 struct Position {
-    int row;
-    int col;
+  int row;
+  int col;
 };
 
 // Variáveis globais
-Maze maze;
-int num_rows;
-int num_cols;
-bool exit_found = false;
+Maze maze;                          // Labirinto representado como matriz
+int maze_rows, maze_cols;            // Dimensões do labirinto
+std::queue<Position> open_positions; // Fila de posições a serem exploradas
+bool exit_found = false;             // Indica se a saída foi encontrada
+std::mutex maze_mutex;               // Controle de concorrência
 
-// Mutexes para sincronização
-std::mutex maze_mutex;
-std::mutex cout_mutex;
-std::mutex exit_mutex;
+// Função para carregar o labirinto a partir de um arquivo
+Position load_maze(const std::string &file_name) {
+  std::ifstream file(file_name);
+  if (!file.is_open()) {
+    std::cerr << "Erro ao abrir o arquivo: " << file_name << std::endl;
+    return {-1, -1}; // Retorna posição inválida em caso de erro
+  }
 
-// Função para carregar o labirinto de um arquivo
-Position load_maze(const std::string& file_name) {
-    std::ifstream infile(file_name);
-    if (!infile) {
-        std::cerr << "Erro ao abrir o arquivo " << file_name << std::endl;
-        return {-1, -1};
+  // Lê as dimensões do labirinto
+  file >> maze_rows >> maze_cols;
+  maze.resize(maze_rows, std::vector<char>(maze_cols)); // Redimensiona a matriz
+
+  // Preenche o labirinto com os caracteres lidos do arquivo
+  for (int i = 0; i < maze_rows; ++i) {
+    for (int j = 0; j < maze_cols; ++j) {
+      file >> maze[i][j];
     }
+  }
+  file.close();
 
-    infile >> num_rows >> num_cols;
-    infile.ignore(std::numeric_limits<std::streamsize>::max(), '\n'); // Ignora o resto da linha
-
-    maze.resize(num_rows, std::vector<char>(num_cols));
-
-    Position initial_pos = {-1, -1};
-    for (int i = 0; i < num_rows; ++i) {
-        std::string line;
-        std::getline(infile, line);
-        if (line.length() < num_cols) {
-            std::cerr << "Linha " << i << " tem comprimento menor que o esperado." << std::endl;
-            return {-1, -1};
-        }
-        for (int j = 0; j < num_cols; ++j) {
-            maze[i][j] = line[j];
-            if (maze[i][j] == 'e') {
-                initial_pos.row = i;
-                initial_pos.col = j;
-            }
-        }
+  // Encontra a posição inicial ('e') no labirinto
+  for (int i = 0; i < maze_rows; ++i) {
+    for (int j = 0; j < maze_cols; ++j) {
+      if (maze[i][j] == 'e') {
+        return {i, j}; // Retorna a posição inicial
+      }
     }
+  }
 
-    if (initial_pos.row == -1 || initial_pos.col == -1) {
-        std::cerr << "Entrada 'e' não encontrada no labirinto." << std::endl;
-    }
-
-    infile.close();
-    return initial_pos;
+  return {-1, -1}; // Retorna posição inválida se não encontrar 'e'
 }
 
-// Função para imprimir o labirinto
-void print_maze() {
-    std::lock_guard<std::mutex> lock(cout_mutex);
-    for (int i = 0; i < num_rows; ++i) {
-        for (int j = 0; j < num_cols; ++j) {
-            std::cout << maze[i][j];
-        }
-        std::cout << '\n';
+// Função para imprimir o estado atual do labirinto
+void display_maze() {
+  std::cout << "\033[2J\033[1;1H"; // Limpa a tela
+  for (int i = 0; i < maze_rows; ++i) {
+    for (int j = 0; j < maze_cols; ++j) {
+      std::cout << maze[i][j];
     }
-    std::cout << std::endl; // Adiciona uma linha em branco para melhor visualização
+    std::cout << '\n'; // Quebra de linha ao final de cada linha do labirinto
+  }
 }
 
-// Função para verificar se uma posição é válida
+// Verifica se uma posição é válida para ser explorada
 bool is_valid_position(int row, int col) {
-    std::lock_guard<std::mutex> lock(maze_mutex);
-    if (row >= 0 && row < num_rows && col >= 0 && col < num_cols) {
-        char ch = maze[row][col];
-        return (ch == 'x' || ch == 's');
-    }
-    return false;
+  // Verifica se está dentro dos limites do labirinto e se é um caminho livre ('x' ou 's')
+  return (row >= 0 && row < maze_rows && col >= 0 && col < maze_cols &&
+          (maze[row][col] == 'x' || maze[row][col] == 's'));
 }
 
-// Função principal para navegar pelo labirinto
-void walk(Position pos) {
-    // Verifica se a saída já foi encontrada
+// Função que realiza a exploração do labirinto
+void explore_maze() {
+  while (true) {
+    Position current_pos;
+
     {
-        std::lock_guard<std::mutex> lock(exit_mutex);
-        if (exit_found) {
-            return;
-        }
+      std::lock_guard<std::mutex> lock(maze_mutex); // Bloqueia a fila para acesso exclusivo
+      if (exit_found || open_positions.empty()) {
+        return; // Termina se a saída foi encontrada ou não há mais posições a explorar
+      }
+
+      current_pos = open_positions.front();
+      open_positions.pop();
     }
 
-    // Bloqueia o labirinto para acessar e modificar
+    // Verifica se a posição atual é a saída
+    if (maze[current_pos.row][current_pos.col] == 's') {
+      std::lock_guard<std::mutex> lock(maze_mutex);
+      exit_found = true;
+      return; // Termina quando a saída é encontrada
+    }
+
+    // Marca a posição atual como visitada
+    maze[current_pos.row][current_pos.col] = '.';
+    display_maze(); // Exibe o estado atualizado do labirinto
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // Pequena pausa para visualização
+
+    // Verifica as posições adjacentes (cima, baixo, esquerda, direita)
+    Position neighbors[] = {
+        {current_pos.row - 1, current_pos.col}, // Cima
+        {current_pos.row + 1, current_pos.col}, // Baixo
+        {current_pos.row, current_pos.col - 1}, // Esquerda
+        {current_pos.row, current_pos.col + 1}  // Direita
+    };
+
     {
-        std::lock_guard<std::mutex> lock(maze_mutex);
-
-        // Verifica se a posição atual é a saída
-        if (maze[pos.row][pos.col] == 's') {
-            {
-                std::lock_guard<std::mutex> lock(exit_mutex);
-                exit_found = true;
-            }
-            maze[pos.row][pos.col] = '.';
-
-            print_maze();
-            return;
+      std::lock_guard<std::mutex> lock(maze_mutex);
+      for (const auto &neighbor : neighbors) {
+        if (is_valid_position(neighbor.row, neighbor.col)) {
+          open_positions.push(neighbor); // Adiciona posição válida à fila
         }
-
-        // Marca a posição atual como visitada
-        maze[pos.row][pos.col] = '.';
+      }
     }
-
-    // Imprime o labirinto
-    print_maze();
-
-    // Pequeno atraso para visualização
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // Direções: cima, baixo, esquerda, direita
-    int row_moves[] = {-1, 1, 0, 0};
-    int col_moves[] = {0, 0, -1, 1};
-
-    std::vector<Position> next_positions;
-
-    for (int i = 0; i < 4; ++i) {
-        int new_row = pos.row + row_moves[i];
-        int new_col = pos.col + col_moves[i];
-
-        if (is_valid_position(new_row, new_col)) {
-            // Bloqueia o labirinto para marcar posições
-            {
-                std::lock_guard<std::mutex> lock(maze_mutex);
-                // Verifica novamente para garantir que a posição não foi visitada
-                if (is_valid_position(new_row, new_col)) {
-                    next_positions.push_back({new_row, new_col});
-                    // Marca como 'o' temporariamente para evitar que outras threads a considerem
-                    maze[new_row][new_col] = 'o';
-                }
-            }
-        }
-    }
-
-    if (next_positions.empty()) {
-        // Não há mais posições para explorar a partir daqui
-        return;
-    }
-
-    // Se houver múltiplas posições, cria threads para posições adicionais
-    std::vector<std::thread> threads;
-
-    for (size_t i = 1; i < next_positions.size(); ++i) {
-        // Cria uma nova thread para explorar next_positions[i]
-        threads.emplace_back([pos = next_positions[i]]() {
-            walk(pos);
-        });
-    }
-
-    // Continua com a primeira posição nesta thread
-    walk(next_positions[0]);
-
-    // Aguarda as threads terminarem
-    for (auto& t : threads) {
-        t.join();
-    }
+  }
 }
 
-int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Uso: " << argv[0] << " <arquivo_labirinto>" << std::endl;
-        return 1;
+int main(int argc, char *argv[]) {
+  if (argc != 2) {
+    std::cerr << "Uso: " << argv[0] << " <arquivo_labirinto>" << std::endl;
+    return 1;
+  }
+
+  Position start_position = load_maze(argv[1]); // Carrega o labirinto do arquivo
+  if (start_position.row == -1 || start_position.col == -1) {
+    std::cerr << "Posição inicial não encontrada no labirinto." << std::endl;
+    return 1;
+  }
+
+  // Inicializa a fila com a posição inicial
+  open_positions.push(start_position);
+
+  // Cria e inicia múltiplas threads para explorar o labirinto
+  std::vector<std::thread> threads(5);
+  for (auto &thread : threads) {
+    thread = std::thread(explore_maze);
+  }
+
+  // Aguarda todas as threads finalizarem
+  for (auto &thread : threads) {
+    if (thread.joinable()) {
+      thread.join();
     }
+  }
 
-    Position initial_pos = load_maze(argv[1]);
-    if (initial_pos.row == -1 || initial_pos.col == -1) {
-        std::cerr << "Posição inicial não encontrada no labirinto." << std::endl;
-        return 1;
-    }
+  // Exibe o resultado final
+  if (exit_found) {
+    std::cout << "Saída encontrada!" << std::endl;
+  } else {
+    std::cout << "Não foi possível encontrar a saída." << std::endl;
+  }
 
-    // Inicia a exploração
-    walk(initial_pos);
-
-    if (exit_found) {
-        std::cout << "Saída encontrada!" << std::endl;
-    } else {
-        std::cout << "Não foi possível encontrar a saída." << std::endl;
-    }
-
-    return 0;
+  return 0;
 }
